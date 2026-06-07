@@ -55,7 +55,9 @@ class OpenRouterConfig:
     model: str = "openai/gpt-oss-120b:nitro"
     api_key: str = ""
     max_tokens: int = 100000
-    temperature: float = 0.6
+    # Temperature 0 => most reliable tool-call JSON (gpt-oss-120b otherwise emits
+    # malformed argument JSON for SQL-bearing args) and less over-exploration.
+    temperature: float = 0.0
     max_iterations: int = 30
     # Provider routing - no restriction by default
     provider: dict[str, Any] = field(default_factory=dict)

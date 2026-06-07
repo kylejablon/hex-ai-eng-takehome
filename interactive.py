@@ -6,7 +6,9 @@ allowing you to enter prompts and receive streaming responses.
 """
 
 import argparse
+import os
 
+from dotenv import load_dotenv
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Prompt
@@ -14,6 +16,11 @@ from rich.prompt import Prompt
 from framework.agent import Agent, Tool
 from framework.llm import OpenRouterConfig
 from framework.stream_printer import StreamPrinter
+from tools.explore_schema import EXPLORE_SCHEMA
+from tools.explore_table import EXPLORE_TABLE
+from tools.list_guides import LIST_GUIDES
+from tools.open_guide import OPEN_GUIDE
+from tools.run_query import RUN_QUERY
 from tools.submit_answer import SUBMIT_ANSWER
 
 
@@ -25,7 +32,11 @@ def create_tools() -> dict[str, Tool]:
     """
     return {
         SUBMIT_ANSWER.name: SUBMIT_ANSWER,
-        # You can add your own tools here to test!
+        EXPLORE_SCHEMA.name: EXPLORE_SCHEMA,
+        EXPLORE_TABLE.name: EXPLORE_TABLE,
+        RUN_QUERY.name: RUN_QUERY,
+        LIST_GUIDES.name: LIST_GUIDES,
+        OPEN_GUIDE.name: OPEN_GUIDE,
     }
 
 
@@ -80,14 +91,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--api-key",
-        required=True,
-        help="OpenRouter API key",
+        default=os.environ.get("OPENROUTER_API_KEY"),
+        help="OpenRouter API key (defaults to OPENROUTER_API_KEY env var)",
     )
     return parser.parse_args()
 
 
 def main() -> None:
     """Run the interactive REPL."""
+    load_dotenv()
     args = parse_args()
 
     console = Console()

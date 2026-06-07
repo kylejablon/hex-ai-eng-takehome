@@ -1,6 +1,14 @@
 """Tool for submitting a final SQL query answer to the evaluation pipeline."""
 
+from pydantic import BaseModel
+
 from framework.agent import ANSWER_SUBMITTED_PREFIX, Tool
+
+
+class SubmitAnswerArgs(BaseModel):
+    """Arguments for the submit_answer tool."""
+
+    query: str
 
 
 def submit_answer(query: str) -> str:
@@ -43,4 +51,5 @@ SUBMIT_ANSWER: Tool = Tool(
         "required": ["query"],
     },
     function=submit_answer,
+    args_model=SubmitAnswerArgs,
 )

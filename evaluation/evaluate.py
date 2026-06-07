@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import threading
 import time
@@ -40,6 +41,7 @@ from typing import Any
 
 import polars as pl
 import sqlglot
+from dotenv import load_dotenv
 from rich.console import Console
 from rich.live import Live
 from rich.table import Table
@@ -49,6 +51,11 @@ from evaluation.compare import loosely_compare_dataframes
 from framework.agent import ANSWER_SUBMITTED_PREFIX, Agent, AgentEvent, EventType, Tool
 from framework.database import execute_query
 from framework.llm import OpenRouterConfig, TokenUsage
+from tools.explore_schema import EXPLORE_SCHEMA
+from tools.explore_table import EXPLORE_TABLE
+from tools.list_guides import LIST_GUIDES
+from tools.open_guide import OPEN_GUIDE
+from tools.run_query import RUN_QUERY
 from tools.submit_answer import SUBMIT_ANSWER
 
 # =============================================================================
@@ -145,8 +152,11 @@ def create_tools() -> dict[str, Tool]:
     """
     return {
         SUBMIT_ANSWER.name: SUBMIT_ANSWER,
-        # Add your custom tools here:
-        # MY_TOOL.name: MY_TOOL,
+        EXPLORE_SCHEMA.name: EXPLORE_SCHEMA,
+        EXPLORE_TABLE.name: EXPLORE_TABLE,
+        RUN_QUERY.name: RUN_QUERY,
+        LIST_GUIDES.name: LIST_GUIDES,
+        OPEN_GUIDE.name: OPEN_GUIDE,
     }
 
 
@@ -940,8 +950,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--api-key",
-        required=True,
-        help="OpenRouter API key",
+        default=os.environ.get("OPENROUTER_API_KEY"),
+        help="OpenRouter API key (defaults to OPENROUTER_API_KEY env var)",
     )
     parser.add_argument(
         "--concurrency",
@@ -966,6 +976,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     """Main entry point for the evaluation script."""
+    load_dotenv()
     args = parse_args()
     console = Console()
 

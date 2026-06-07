@@ -16,3 +16,6 @@ logs/
 
 # Downloaded CTU databases (zipped version tracked with Git LFS)
 *.duckdb
+
+# Local files with credentials
+.env

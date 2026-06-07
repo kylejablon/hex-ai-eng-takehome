@@ -4,11 +4,14 @@ This module implements an agent that uses the OpenRouter API for LLM inference,
 supporting streaming responses, tool calling, and reasoning token display.
 """
 
-import json
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from enum import Enum, auto
+from functools import cache
 from typing import Any
+
+from pydantic import BaseModel, TypeAdapter, ValidationError
+from pydantic_core import from_json
 
 from framework.llm import OpenRouterClient, OpenRouterConfig, TokenUsage
 
@@ -60,12 +63,18 @@ class Tool:
     """Represents a tool that can be called by the agent.
 
     Tool functions must return a string that will be shown to the LLM.
+
+    `args_model` is a pydantic model describing the tool's arguments. It is used to
+    validate (and partially recover) the JSON the model emits for a tool call -- see
+    `_parse_arguments`. `parameters` remains the hand-tuned JSON Schema advertised to
+    the API; the two describe the same arguments from the prompt and runtime sides.
     """
 
     name: str
     description: str
     parameters: dict[str, Any]
     function: ToolFunction
+    args_model: type[BaseModel] | None = None
 
 
 @dataclass
@@ -265,6 +274,12 @@ class Agent:
 
         Guaranteed to return a string, swallowing exceptions.
         """
+        # gpt-oss-120b often emits a phantom, nameless second tool call (with junk
+        # arguments) alongside a real one. It maps to no tool, so treat it as a no-op
+        # instead of echoing a confusing parse error back to the model.
+        if not tool_call.name.strip():
+            return "(empty tool call ignored)"
+
         if tool_call.error:
             return f"Error parsing arguments for tool '{tool_call.name}': {tool_call.error}"
 
@@ -353,7 +368,21 @@ class Agent:
             "NEVER stop without calling submit_answer. Even if you've computed the answer, "
             "you MUST submit it via submit_answer with a valid SQL query.\n\n"
             "Do not provide answers as plain text - always use the submit_answer tool "
-            "with a valid SQL query that generates a dataframe with the intended answer."
+            "with a valid SQL query that generates a dataframe with the intended answer.\n\n"
+            "KNOWLEDGE BASE: You have a knowledge base of markdown files about our SQL "
+            "data. Call list_guides to find relevant guides, then open_guide to read "
+            "them.\n\n"
+            "TOOL CALL FORMATTING: A tool's arguments must be a single valid JSON object. "
+            "When a query argument contains SQL, write the SQL as a SINGLE-LINE JSON string "
+            "with NO literal newline characters, and use single quotes for SQL string "
+            "literals so you never need to escape double quotes. Malformed JSON will be "
+            "rejected and waste a turn.\n\n"
+            "WORKFLOW: Be decisive and efficient - you have a limited number of steps. "
+            "Use explore_schema and explore_table only as much as needed to find the right "
+            "tables and columns; do NOT repeatedly re-explore the same things. Use run_query "
+            "to test your query, and as soon as its results look correct, immediately call "
+            "submit_answer with that same query. Always submit a working answer well before "
+            "you run out of steps rather than over-exploring."
         )
 
     def run(self, prompt: str) -> Iterator[AgentEvent]:
@@ -364,8 +393,23 @@ class Agent:
         # Track cumulative token usage across all iterations
         total_usage = TokenUsage()
 
+        budget_msg: Message | None = None
         for iteration in range(self.config.max_iterations):
             yield AgentEvent(type=EventType.ITERATION_START, data={"iteration": iteration + 1})
+
+            # Show the step budget to the agent every turn so it can pace itself.
+            # Keep a single, always-current note at the end of the conversation.
+            if budget_msg is not None and budget_msg in self.conversation.messages:
+                self.conversation.messages.remove(budget_msg)
+            remaining = self.config.max_iterations - iteration
+            budget_msg = Message(
+                role="user",
+                content=(
+                    f"[Step {iteration + 1} of {self.config.max_iterations}, "
+                    f"{remaining} step(s) remaining]"
+                ),
+            )
+            self.conversation.messages.append(budget_msg)
 
             full_response = ""
             tool_calls_data: list[dict[str, Any]] = []
@@ -380,7 +424,7 @@ class Agent:
                         total_usage = total_usage + event.data["usage"]
 
             # Parse tool calls from the structured response
-            tool_calls = _parse_tool_calls_from_api(tool_calls_data)
+            tool_calls = _parse_tool_calls_from_api(tool_calls_data, self.tools)
 
             if not tool_calls:
                 # Check if this is an empty response (model just stopped)
@@ -488,8 +532,70 @@ class Agent:
         )
 
 
-def _parse_tool_calls_from_api(tool_calls_data: list[dict[str, Any]]) -> list[ToolCall]:
-    """Parse tool calls from OpenAI-compatible API response format."""
+@cache
+def _adapter_for(model: type[BaseModel]) -> TypeAdapter[BaseModel]:
+    """Cache one TypeAdapter per args model (building one is not free)."""
+    return TypeAdapter(model)
+
+
+def _format_validation_error(error: ValidationError) -> str:
+    """Condense a pydantic ValidationError into a short, model-readable message."""
+    problems = "; ".join(
+        f"{'.'.join(str(p) for p in err['loc']) or '(root)'}: {err['msg']}"
+        for err in error.errors()
+    )
+    return f"Invalid arguments: {problems}"
+
+
+def _parse_arguments(
+    arguments_str: str, model: type[BaseModel] | None
+) -> tuple[dict[str, Any], str | None]:
+    """Validate a tool call's raw argument JSON against its pydantic model.
+
+    Recovers the "phantom split" gpt-oss exhibits, where it peels a call's closing
+    brace off into a separate, nameless tool-call slot and leaves the real call's
+    argument JSON truncated. Pydantic partial JSON parsing fills in the missing tail.
+
+    A strict (lossless) parse is tried first; partial parsing is only the fallback,
+    for input that is genuinely cut short, since it can silently truncate a string
+    rather than reject malformed input.
+
+    Returns (kwargs, None) on success, or ({}, error_message) on failure.
+    """
+    error: str | None = None
+    for allow_partial in (False, True):
+        try:
+            if model is None:
+                # A tool without a declared model: parse leniently, no schema.
+                parsed = from_json(arguments_str, allow_partial=allow_partial)
+                if not isinstance(parsed, dict):
+                    error = "Invalid arguments: expected a JSON object"
+                    continue
+                return parsed, None
+            obj = _adapter_for(model).validate_json(
+                arguments_str, experimental_allow_partial=allow_partial
+            )
+            # by_alias so an aliased field (e.g. ExploreSchemaArgs.schema_name)
+            # dumps back to the function's real keyword ("schema").
+            return obj.model_dump(by_alias=True), None
+        except ValidationError as e:
+            error = _format_validation_error(e)
+        except ValueError as e:
+            error = f"Invalid arguments: {e}"
+
+    return {}, error
+
+
+def _parse_tool_calls_from_api(
+    tool_calls_data: list[dict[str, Any]], tools: dict[str, Tool]
+) -> list[ToolCall]:
+    """Parse tool calls from OpenAI-compatible API response format.
+
+    Each call's arguments are validated against the target tool's pydantic args
+    model (see `_parse_arguments`). A call naming an unknown or empty tool -- such
+    as the nameless phantom call gpt-oss emits alongside a real one -- carries no
+    arguments to act on and is passed through for `_execute_tool` to ignore.
+    """
     tool_calls: list[ToolCall] = []
 
     for tc in tool_calls_data:
@@ -498,21 +604,16 @@ def _parse_tool_calls_from_api(tool_calls_data: list[dict[str, Any]]) -> list[To
         name = function.get("name", "")
         arguments_str = function.get("arguments", "{}")
 
-        try:
-            arguments = json.loads(arguments_str)
-            error = None
-        except json.JSONDecodeError as e:
-            # Don't print to stdout, return error in ToolCall
-            arguments = {}
-            error = f"Invalid JSON arguments: {e}"
+        tool = tools.get(name)
+        if tool is None:
+            # Unknown / nameless call: nothing to validate. _execute_tool reports
+            # the unknown or empty tool name.
+            tool_calls.append(ToolCall(id=tc_id, name=name, arguments={}))
+            continue
 
+        arguments, error = _parse_arguments(arguments_str, tool.args_model)
         tool_calls.append(
-            ToolCall(
-                id=tc_id,
-                name=name,
-                arguments=arguments,
-                error=error,
-            )
+            ToolCall(id=tc_id, name=name, arguments=arguments, error=error)
         )
 
     return tool_calls
