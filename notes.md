@@ -105,7 +105,7 @@ Third, I would want to investigate the wording issues. I think we likely need so
 
 ## How I used AI
 
-I used Claude code to write all of my code, my initial tool calls were all written in plan mode. I did subsequent iteration instandard mode.
+I used Claude code to write all of my code, my initial tool calls were all written in plan mode. I did subsequent iteration in standard mode. I also had claude annotate evaluation traces which quickly let me identify where particular runs had gone wrong.
 
 I usually include something in my prompt to tell claude to "grill" me: https://www.aihero.dev/my-grill-me-skill-has-gone-viral. So it's extremely aggressive in the questioning
 
