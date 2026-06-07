@@ -48,29 +48,50 @@ For reference, current standing:
 
 ### Step 2: Adding a basic knowledge base
 
-Next, I added the knowledge base compoennt. Interestingly, when I added these, I actually saw performance drop quite a bit. I initially went from a 70% -> a 38% pass rate on the easy problems, before later recovering.
+Next, I added the knowledge base compoennt. Interestingly, when I added these, I actually saw performance drop quite a bit. I initially went from a 70% -> a 38% pass rate on the easy problems, before later recovering to the final numbers below.
 
-- First iteration: Basic knowledge base
-  - tools: explore_guides (list all the guides, with a 'grep' parameter), open_guide (let the agent read a guide)
-- Second iteration: Tweaking iteration
-  - I started using pydantic's partial json parsing (https://pydantic.dev/docs/validation/latest/concepts/json/#partial-json-parsing) rather than manually parsing everything which actually substantially boosted performance a lot
-  - I updated the system prompt, and give it a really really short context
-  - tools: list_guides, open_guide (removed the "after" parameter)
-    - I renamed from explore_guides -> list_guides because it felt more natrual to me
+First, I implementd a basic knowledge base. I basically just added two tools: explore_guides (list all the guides, with a 'grep' parameter), open_guide (let the agent read a guide). At the end of this first iteration our pass rate actually went down from what it was before. 
+  We got a roughly 35% passrate on easies! This told me we needed some more tweaking.
 
+Second, I added some subtle tweaking.I started using pydantic's partial json parsing (https://pydantic.dev/docs/validation/latest/concepts/json/#partial-json-parsing) rather than manually parsing everything which actually substantially boosted performance a lot. I updated the system prompt, and gave it a really really short context on what the knowledge base actually was. Finally, I renamed and tweaked the initial tools. list_guides, open_guide (removed the "after" parameter). In particular, I renamed from explore_guides -> list_guides because it felt more natural to me.
+  At the end of this second iteration, we had slightly improved from the end of step 1, we saw the following results
+
+At the end of this step, I did 3 runs on easy/hard to verify how I was doing. I noticed a ton of max iteration errors that really concerned me, and some non-determinism. See my claude code output.
 ```
-┌───────┬────────┬──────────┬───────┬───────┬───────────┐
-│ Split │ Passed │ Mismatch │ Other │ Total │ Pass Rate │
-├───────┼────────┼──────────┼───────┼───────┼───────────┤
-│ easy  │ 49     │ 12       │ 3     │ 64    │ 76.6%     │
-├───────┼────────┼──────────┼───────┼───────┼───────────┤
-│ hard  │ 25     │ 36       │ 3     │ 64    │ 39.1%     │
-├───────┼────────┼──────────┼───────┼───────┼───────────┤
-│ Total │ 74     │ 48       │ 6     │ 128   │ 57.8%     │
-└───────┴────────┴──────────┴───────┴───────┴───────────┘
+┌──────┬────────────┬──────────────┬──────────────┬────────────────────┬────────┐
+│ Run  │    Easy    │     Hard     │    Total     │ "Other" (max-iter) │ Tokens │
+├──────┼────────────┼──────────────┼──────────────┼────────────────────┼────────┤
+│ 1    │ 44 (68.8%) │ 22 (34.4%)   │ 66 (51.6%)   │ 22                 │ 11.3M  │
+├──────┼────────────┼──────────────┼──────────────┼────────────────────┼────────┤
+│ 2    │ 44 (68.8%) │ 27 (42.2%)   │ 71 (55.5%)   │ 8                  │ 7.0M   │
+├──────┼────────────┼──────────────┼──────────────┼────────────────────┼────────┤
+│ 3    │ 50 (78.1%) │ 28 (43.8%)   │ 78 (60.9%)   │ 8                  │ 7.95M  │
+├──────┼────────────┼──────────────┼──────────────┼────────────────────┼────────┤
+│ mean │ 46 (71.9%) │ 25.7 (40.1%) │ 71.7 (56.0%) │ 12.7               │ —      │
+└──────┴────────────┴──────────────┴──────────────┴────────────────────┴────────┘
 ```
 
-Andrew (my recruiter) told me to aim for 70% pass rate on easies, and 30% pass rate on the hards. I figured since I was beating that, and was at roughly the ~3 hour marker that I should call it quits.
+Third, I noticed we were still getting a lot of AGENT_ERROR calls. All of my errors except for 1 were "AGENT_ERROR" calls. Turns out, the gpt-oss parsing issue was still not fully solved. Sometimes we would parse a single call into two separate calls, so there was one call and a phantom call. I fixed this issue by parsing the entire original call with pydantic. 
+
+At the end of this step, I noticed significantly less non-determinism. I also noticed fewer token usage (therefore less wandering), and less AGENT_ERROR's. So even though it was roughly a 4% bump, I felt significantly better about our results at this point. Here some claude code output
+```
+┌──────┬────────────┬──────────────┬──────────────┬─────────────────────────┬────────┐
+│ Run  │    Easy    │     Hard     │    Total     │ AGENT_ERROR (E+H, all   │ Tokens │
+│      │            │              │              │ max-iter)               │        │
+├──────┼────────────┼──────────────┼──────────────┼─────────────────────────┼────────┤
+│ 1    │ 48 (75.0%) │ 30 (46.9%)   │ 78 (60.9%)   │ 7   (4 + 3)             │ 6.93M  │
+├──────┼────────────┼──────────────┼──────────────┼─────────────────────────┼────────┤
+│ 2    │ 46 (71.9%) │ 25 (39.1%)   │ 71 (55.5%)   │ 7   (4 + 3)             │ 6.76M  │
+├──────┼────────────┼──────────────┼──────────────┼─────────────────────────┼────────┤
+│ 3    │ 51 (79.7%) │ 25 (39.1%)   │ 76 (59.4%)   │ 6   (4 + 2)             │ 6.53M  │
+├──────┼────────────┼──────────────┼──────────────┼─────────────────────────┼────────┤
+│ mean │ 48.3(75.5%)│ 26.7 (41.7%) │ 75.0 (58.6%) │ 6.7 (4.0 + 2.7)         │ 6.74M  │
+└──────┴────────────┴──────────────┴──────────────┴─────────────────────────┴────────┘
+
+Where the remaining gap is: almost entirely MISMATCH — wrong-but-submitted SQL, concentrated on hard (36–37/run). That's the domain-correctness frontier (reading/applying the right guide), not a parsing or infra problem anymore.
+```
+
+Andrew (my recruiter) told me to aim for 70% pass rate on easies, and 30% pass rate on the hards. I figured since I was beating that, and was at roughly the ~4 hour marker that I should call it quits. Fixing the sql mismatches is significantly harder.
 
 ### What I would do if I had more time
 
@@ -80,11 +101,11 @@ First, I would experiment with using bash commands rather than standard sql . An
 
 Second, gpt-oss is a solid model but there are better options out there. I'd also explore iterating on the model itself. But for now, I didn't want to waste money on the prompting.
 
-Third, I would also iterate a bit on the knowledge base. I saw a small boost. But not a significant one. We were still seeing AGENT_ERROR, and one SQL_ERROR. So taking a look at what we could do to tweak agent reliability in that case would go a long way.
+Third, I would want to investigate the wording issues. I think we likely need some sort of query planning or query understanding step. This is probably the next big lever unlock given more time.
 
-## How I used AI?
+## How I used AI
 
-I used Claude code to write all of my code. 
+I used Claude code to write all of my code, my initial tool calls were all written in plan mode. I did subsequent iteration instandard mode.
 
 I usually include something in my prompt to tell claude to "grill" me: https://www.aihero.dev/my-grill-me-skill-has-gone-viral. So it's extremely aggressive in the questioning
 

@@ -274,8 +274,8 @@ class Agent:
 
         Guaranteed to return a string, swallowing exceptions.
         """
-        # gpt-oss-120b often emits a phantom, nameless second tool call (with junk
-        # arguments) alongside a real one. It maps to no tool, so treat it as a no-op
+        # A nameless tool call that survives _merge_split_tool_calls had nothing
+        # before it to stitch onto, so it maps to no tool. Treat it as a no-op
         # instead of echoing a confusing parse error back to the model.
         if not tool_call.name.strip():
             return "(empty tool call ignored)"
@@ -423,7 +423,10 @@ class Agent:
                     if "usage" in event.data and event.data["usage"]:
                         total_usage = total_usage + event.data["usage"]
 
-            # Parse tool calls from the structured response
+            # gpt-oss sometimes splits one tool call across two slots; stitch the
+            # nameless continuation back on before parsing AND before recording the
+            # assistant message, so the stored call and its tool result stay 1:1.
+            tool_calls_data = _merge_split_tool_calls(tool_calls_data)
             tool_calls = _parse_tool_calls_from_api(tool_calls_data, self.tools)
 
             if not tool_calls:
@@ -586,15 +589,43 @@ def _parse_arguments(
     return {}, error
 
 
+def _merge_split_tool_calls(
+    tool_calls_data: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Stitch gpt-oss "phantom split" tool calls back into one.
+
+    gpt-oss sometimes splits a single tool call across two slots, peeling the tail
+    of its argument JSON into a second, nameless slot -- frequently mid-string,
+    e.g. ``{"table_name": "financial.account`` + ``"\\n}``. We concatenate each
+    nameless slot's argument fragment onto the preceding named call, reconstructing
+    the original; pydantic (partial mode) then parses the whitespace-laden result
+    seamlessly. Named calls are never merged, so genuine parallel tool calls survive.
+    """
+    merged: list[dict[str, Any]] = []
+    for tc in tool_calls_data:
+        name = tc.get("function", {}).get("name", "") or ""
+        if not name.strip() and merged:
+            # A nameless continuation of the previous call: append its fragment.
+            prev_fn = merged[-1]["function"]
+            fragment = tc.get("function", {}).get("arguments", "") or ""
+            prev_fn["arguments"] = (prev_fn.get("arguments", "") or "") + fragment
+            continue
+        # Copy the call (and its function dict) so stitching never mutates the input.
+        merged.append({**tc, "function": dict(tc.get("function", {}))})
+
+    return merged
+
+
 def _parse_tool_calls_from_api(
     tool_calls_data: list[dict[str, Any]], tools: dict[str, Tool]
 ) -> list[ToolCall]:
     """Parse tool calls from OpenAI-compatible API response format.
 
-    Each call's arguments are validated against the target tool's pydantic args
-    model (see `_parse_arguments`). A call naming an unknown or empty tool -- such
-    as the nameless phantom call gpt-oss emits alongside a real one -- carries no
-    arguments to act on and is passed through for `_execute_tool` to ignore.
+    Expects `tool_calls_data` to have already been run through
+    `_merge_split_tool_calls`. Each call's arguments are validated against the
+    target tool's pydantic args model (see `_parse_arguments`). A call naming an
+    unknown or empty tool is passed through with no arguments for `_execute_tool`
+    to ignore (e.g. a stray nameless call with nothing before it to stitch onto).
     """
     tool_calls: list[ToolCall] = []
 
